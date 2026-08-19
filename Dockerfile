@@ -20,18 +20,9 @@ COPY rust-toolchain.toml ./
 RUN NIGHTLY="$(sed -nE 's/^channel[[:space:]]*=[[:space:]]*"([^"]+)"/\1/p' rust-toolchain.toml)" \
     && rustup install "$NIGHTLY" && rustup default "$NIGHTLY"
 
-# Copy manifests first for better caching
-COPY Cargo.toml Cargo.lock ./
-COPY crates ./crates
-COPY apps/courier ./apps/courier
-COPY scripts ./scripts
-COPY vendor ./vendor
-COPY wit ./wit
-# docs/src is embedded into moltis-agents via include_dir! (crates/agents/src/docs.rs).
-# CHANGELOG.md is the target of the docs/src/changelog.md symlink, so it must be
-# present at the repo root for that symlink to resolve during the embed.
-COPY CHANGELOG.md ./CHANGELOG.md
-COPY docs/src ./docs/src
+# Everything that does not read the source tree goes above the COPY, so a
+# source change does not reinstall apt packages, Node, the WASM target, or the
+# Tailwind binary. Only the steps below the COPY are meant to rebuild per commit.
 
 ENV DEBIAN_FRONTEND=noninteractive
 # Install build dependencies for llama-cpp-sys-2
@@ -46,16 +37,37 @@ RUN apt-get update -qq && \
     apt-get install -yqq --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*
 
-# Build all web assets (Vite JS + Tailwind CSS + service worker)
+# Install the WASM target ahead of the source copy: it depends on the toolchain
+# pin, not on the code.
+RUN rustup target add wasm32-wasip2
+
+# Fetch the standalone Tailwind binary ahead of the source copy too, so a
+# source change does not re-download it. build-web-assets.sh resolves
+# TAILWINDCSS through dirname, so it has to be given an absolute path.
 RUN ARCH=$(uname -m) && \
     case "$ARCH" in x86_64) TW="tailwindcss-linux-x64";; aarch64) TW="tailwindcss-linux-arm64";; esac && \
-    curl -sLO "https://github.com/tailwindlabs/tailwindcss/releases/latest/download/$TW" && \
-    chmod +x "$TW" && \
-    TAILWINDCSS="./$TW" ./scripts/build-web-assets.sh
+    curl -sL -o /usr/local/bin/tailwindcss \
+      "https://github.com/tailwindlabs/tailwindcss/releases/latest/download/$TW" && \
+    chmod +x /usr/local/bin/tailwindcss
 
-# Install WASM target and build WASM components (embedded via include_bytes!)
-RUN rustup target add wasm32-wasip2 && \
-    cargo build --target wasm32-wasip2 -p moltis-wasm-calc -p moltis-wasm-web-fetch -p moltis-wasm-web-search --release
+# Source tree. Every layer below this one rebuilds when the code changes.
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY apps/courier ./apps/courier
+COPY scripts ./scripts
+COPY vendor ./vendor
+COPY wit ./wit
+# docs/src is embedded into moltis-agents via include_dir! (crates/agents/src/docs.rs).
+# CHANGELOG.md is the target of the docs/src/changelog.md symlink, so it must be
+# present at the repo root for that symlink to resolve during the embed.
+COPY CHANGELOG.md ./CHANGELOG.md
+COPY docs/src ./docs/src
+
+# Build all web assets (Vite JS + Tailwind CSS + service worker)
+RUN TAILWINDCSS=/usr/local/bin/tailwindcss ./scripts/build-web-assets.sh
+
+# Build WASM components (embedded via include_bytes!)
+RUN cargo build --target wasm32-wasip2 -p moltis-wasm-calc -p moltis-wasm-web-fetch -p moltis-wasm-web-search --release
 
 # Build release binary with the same portable production feature set used by
 # release/package builds.
