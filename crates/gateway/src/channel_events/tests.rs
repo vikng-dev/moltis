@@ -276,6 +276,63 @@ fn untrusted_channel_context_denies_every_tool_and_private_context() {
 }
 
 #[test]
+fn untrusted_ceiling_defaults_match_the_unconfigured_behaviour() {
+    let mut configured = serde_json::json!({});
+    let mut unconfigured = serde_json::json!({});
+
+    apply_untrusted_channel_context_with(
+        &mut configured,
+        UntrustedAudience::default(),
+        UntrustedTools::default(),
+    );
+    apply_untrusted_channel_context(&mut unconfigured);
+
+    assert_eq!(
+        configured, unconfigured,
+        "defaults must not change behaviour for an unconfigured account"
+    );
+}
+
+#[test]
+fn each_axis_is_lifted_on_its_own() {
+    let mut both = serde_json::json!({ "_private_context": true });
+    apply_untrusted_channel_context_with(
+        &mut both,
+        UntrustedAudience::Trusted,
+        UntrustedTools::Policy,
+    );
+    assert!(both.get("_tool_audience").is_none());
+    assert!(both.get("_tool_policy").is_none());
+    assert_eq!(
+        both["_private_context"], false,
+        "owner-private context is never configurable for a channel turn"
+    );
+
+    let mut audience_only = serde_json::json!({});
+    apply_untrusted_channel_context_with(
+        &mut audience_only,
+        UntrustedAudience::Trusted,
+        UntrustedTools::default(),
+    );
+    assert_eq!(
+        audience_only["_tool_policy"]["deny"],
+        serde_json::json!(["*"]),
+        "lifting the audience alone must still deny every tool by name"
+    );
+
+    let mut tools_only = serde_json::json!({});
+    apply_untrusted_channel_context_with(
+        &mut tools_only,
+        UntrustedAudience::default(),
+        UntrustedTools::Policy,
+    );
+    assert_eq!(
+        tools_only["_tool_audience"], "public",
+        "dropping the name policy alone must still hold the audience ceiling"
+    );
+}
+
+#[test]
 fn public_audience_tools_require_explicit_registration() {
     const REGISTRATION: &str = include_str!("../server/prepare_core/post_state.rs");
 

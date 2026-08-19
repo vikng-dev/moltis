@@ -26,11 +26,21 @@ pub(in crate::channel_events) async fn dispatch_to_chat(
         let sender_role =
             resolve_sender_role(state, &reply_to.account_id, meta.sender_id.as_deref()).await;
 
+        let trusted_channel_turn = is_trusted_channel_turn(sender_role, &reply_to);
+        let (untrusted_audience, untrusted_tools) =
+            resolve_untrusted_ceiling(state, &reply_to.account_id).await;
+
+        // `/sh` is not a capability of its own: it is a way of typing `exec`,
+        // which `run_explicit_shell_command` resolves from the same
+        // request-scoped registry the agent uses. So gate the shortcut on the
+        // same question that gates the tool, and let the policy layers decide
+        // `exec` itself.
+        let turn_may_use_tools = trusted_channel_turn || untrusted_tools == UntrustedTools::Policy;
+
         // `/sh <cmd>` is deliberately not a registered channel command — it
         // falls through to the agent, which force-executes it. Stop it here
-        // for guests, before it reaches the runner.
-        let trusted_channel_turn = is_trusted_channel_turn(sender_role, &reply_to);
-        if !trusted_channel_turn && moltis_agents::runner::explicit_shell_command(text).is_some() {
+        // when the turn gets no tools, before it reaches the runner.
+        if !turn_may_use_tools && moltis_agents::runner::explicit_shell_command(text).is_some() {
             warn!(
                 account_id = %reply_to.account_id,
                 chat_id = %reply_to.chat_id,
@@ -62,7 +72,7 @@ pub(in crate::channel_events) async fn dispatch_to_chat(
         }
 
         let effective_text =
-            if trusted_channel_turn && state.is_channel_command_mode_enabled(&session_key).await {
+            if turn_may_use_tools && state.is_channel_command_mode_enabled(&session_key).await {
                 rewrite_for_shell_mode(text).unwrap_or_else(|| text.to_string())
             } else {
                 text.to_string()
@@ -180,14 +190,15 @@ pub(in crate::channel_events) async fn dispatch_to_chat(
             "_native_channel_request": true,
         });
 
-        // Only an operator in a proven direct chat receives tools and private
-        // context. This is the single condition on purpose: an earlier version
+        // Only an operator in a proven direct chat is trusted outright; every
+        // other turn gets a ceiling, whose tightness comes from the account
+        // config. This is the single condition on purpose: an earlier version
         // also skipped the ceiling for anything that parsed as `/sh`, on the
         // assumption that the guard above had already rejected every untrusted
         // `/sh`. That made the ceiling depend on a rejection 60 lines away, so
         // narrowing that guard would have silently opened this one.
         if !trusted_channel_turn {
-            apply_untrusted_channel_context(&mut params);
+            apply_untrusted_channel_context_with(&mut params, untrusted_audience, untrusted_tools);
         }
 
         // Carry this message's acknowledgment identity into the run so the
